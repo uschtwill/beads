@@ -76,8 +76,9 @@ var (
 	sandboxMode    bool
 	allowStale     bool          // Use --allow-stale: skip staleness check (emergency escape hatch)
 	noDb           bool          // Use --no-db mode: load from JSONL, write back after each command
-	readonlyMode   bool          // Read-only mode: block write operations (for worker sandboxes)
-	lockTimeout    time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
+	readonlyMode    bool          // Read-only mode: block write operations (for worker sandboxes)
+	storeIsReadOnly bool          // Track if store was opened read-only (for staleness checks)
+	lockTimeout     time.Duration // SQLite busy_timeout (default 30s, 0 = fail immediately)
 	profileEnabled bool
 	profileFile    *os.File
 	traceFile      *os.File
@@ -531,7 +532,16 @@ var rootCmd = &cobra.Command{
 				// Invariant: dbPath must always be absolute for filepath.Rel() compatibility
 				// in daemon sync-branch code path. Use CanonicalizePath for OS-agnostic
 				// handling (symlinks, case normalization on macOS).
-				dbPath = utils.CanonicalizePath(filepath.Join(".beads", beads.CanonicalDatabaseName))
+				//
+				// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
+				// which follows redirect files. Without this, a redirected .beads
+				// would create a local database instead of using the redirect target.
+				// (GH#bd-0qel)
+				targetBeadsDir := beads.FindBeadsDir()
+				if targetBeadsDir == "" {
+					targetBeadsDir = ".beads"
+				}
+				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
 		}
 
@@ -567,6 +577,16 @@ var rootCmd = &cobra.Command{
 			noDaemon = true
 			daemonStatus.FallbackReason = FallbackWispOperation
 			debug.Logf("wisp operation detected, using direct mode")
+		}
+
+		// Dolt backend (embedded) is single-process-only; never use daemon/RPC.
+		// This must be checked after dbPath is resolved.
+		if !noDaemon && singleProcessOnlyBackend() {
+			noDaemon = true
+			daemonStatus.AutoStartEnabled = false
+			daemonStatus.FallbackReason = FallbackSingleProcessOnly
+			daemonStatus.Detail = "backend is single-process-only (dolt): daemon mode disabled; using direct mode"
+			debug.Logf("single-process backend detected, using direct mode")
 		}
 
 		// Try to connect to daemon first (unless --no-daemon flag is set or worktree safety check fails)
@@ -786,6 +806,10 @@ var rootCmd = &cobra.Command{
 				needsBootstrap = true // New DB needs auto-import (GH#b09)
 			}
 		}
+
+		// Track final read-only state for staleness checks (GH#1089)
+		// opts.ReadOnly may have changed if read-only open failed and fell back
+		storeIsReadOnly = opts.ReadOnly
 
 		if err != nil {
 			// Check for fresh clone scenario

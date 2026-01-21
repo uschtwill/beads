@@ -885,6 +885,8 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 	// First pass: scan all issues
 	for rows.Next() {
 		var issue types.Issue
+		var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+		var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 		var contentHash sql.NullString
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
@@ -911,18 +913,39 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var awaitID sql.NullString
 		var timeoutNs sql.NullInt64
 		var waiters sql.NullString
+		// Agent fields
+		var hookBead sql.NullString
+		var roleBead sql.NullString
+		var agentState sql.NullString
+		var lastActivity sql.NullTime
+		var roleType sql.NullString
+		var rig sql.NullString
+		var molType sql.NullString
+		// Time-based scheduling fields
+		var dueAt sql.NullTime
+		var deferUntil sql.NullTime
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
+			&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
+			&hookBead, &roleBead, &agentState, &lastActivity, &roleType, &rig, &molType,
+			&dueAt, &deferUntil,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
+		}
+
+		// Parse timestamp strings (TEXT columns require manual parsing)
+		if createdAtStr.Valid {
+			issue.CreatedAt = parseTimeString(createdAtStr.String)
+		}
+		if updatedAtStr.Valid {
+			issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 		}
 
 		if contentHash.Valid {
@@ -992,9 +1015,43 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if waiters.Valid && waiters.String != "" {
 			issue.Waiters = parseJSONStringArray(waiters.String)
 		}
+		// Agent fields
+		if hookBead.Valid {
+			issue.HookBead = hookBead.String
+		}
+		if roleBead.Valid {
+			issue.RoleBead = roleBead.String
+		}
+		if agentState.Valid {
+			issue.AgentState = types.AgentState(agentState.String)
+		}
+		if lastActivity.Valid {
+			issue.LastActivity = &lastActivity.Time
+		}
+		if roleType.Valid {
+			issue.RoleType = roleType.String
+		}
+		if rig.Valid {
+			issue.Rig = rig.String
+		}
+		if molType.Valid {
+			issue.MolType = types.MolType(molType.String)
+		}
+		// Time-based scheduling fields
+		if dueAt.Valid {
+			issue.DueAt = &dueAt.Time
+		}
+		if deferUntil.Valid {
+			issue.DeferUntil = &deferUntil.Time
+		}
 
 		issues = append(issues, &issue)
 		issueIDs = append(issueIDs, issue.ID)
+	}
+
+	// Check for errors during iteration (e.g., connection issues, context cancellation)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating issue rows: %w", err)
 	}
 
 	// Second pass: batch-load labels for all issues
@@ -1018,6 +1075,8 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 	var results []*types.IssueWithDependencyMetadata
 	for rows.Next() {
 		var issue types.Issue
+		var createdAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
+		var updatedAtStr sql.NullString // TEXT column - must parse manually for cross-driver compatibility
 		var contentHash sql.NullString
 		var closedAt sql.NullTime
 		var estimatedMinutes sql.NullInt64
@@ -1049,7 +1108,7 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 			&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
-			&issue.CreatedAt, &issue.CreatedBy, &owner, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
+			&createdAtStr, &issue.CreatedBy, &owner, &updatedAtStr, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&sender, &wisp, &pinned, &isTemplate, &crystallizes,
 			&awaitType, &awaitID, &timeoutNs, &waiters,
@@ -1057,6 +1116,14 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue with dependency type: %w", err)
+		}
+
+		// Parse timestamp strings (TEXT columns require manual parsing)
+		if createdAtStr.Valid {
+			issue.CreatedAt = parseTimeString(createdAtStr.String)
+		}
+		if updatedAtStr.Valid {
+			issue.UpdatedAt = parseTimeString(updatedAtStr.String)
 		}
 
 		if contentHash.Valid {
@@ -1136,6 +1203,11 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			DependencyType: depType,
 		}
 		results = append(results, result)
+	}
+
+	// Check for errors during iteration (e.g., connection issues, context cancellation)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating issue rows with dependency type: %w", err)
 	}
 
 	return results, nil
